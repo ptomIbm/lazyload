@@ -3,7 +3,7 @@
  * � Copyright IBM Corp. 2018
  * US Government Users Restricted Rights - Use, duplication or disclosure restricted by GSA ADP Schedule Contract with IBM Corp.
  *
- * @version 5.6.0.1822
+ * @version 5.6.0.1827
  * @flags w3c,DEBUG,SUPPORT_LEGACY_HEADERS,ENABLE_LOCALSTORAGE_CAPTURE
  */
 
@@ -58,6 +58,7 @@ window.TLT = (function () {
             screenviewMsg = null,
             replay = TLT.getModule("replay"),
             cookieModule = TLT.getModule("TLCookie"),
+            performanceModule = TLT.getModule("performance"),
             webEvent = null,
             urlInfo = utils.getOriginAndPath();
 
@@ -109,6 +110,10 @@ window.TLT = (function () {
 
         if (webEvent && cookieModule) {
             cookieModule.onevent(webEvent);
+        }
+
+        if (webEvent && performanceModule) {
+            performanceModule.onevent(webEvent);
         }
     }
 
@@ -226,6 +231,12 @@ window.TLT = (function () {
          * @private
          */
         lastClickedElement = null,
+
+        /**
+         * Last screen view
+         * @private
+         */
+        lastScreenview = "",
 
         /**
          * List of service passthroughs. These are methods that are called
@@ -690,7 +701,15 @@ window.TLT = (function () {
              * @returns {String} The library version string.
              */
             getLibraryVersion: function () {
-                return "5.6.0.1822";
+                return "5.6.0.1827";
+            },
+
+            normalizeUrl: function (url) {
+                var config = this.getCoreConfig();
+                if (config.normalization && config.normalization.urlFunction) {
+                    return config.normalization.urlFunction(url);
+                }
+                return url;
             },
 
             //---------------------------------------------------------------------
@@ -1070,7 +1089,10 @@ window.TLT = (function () {
                 if (!core.isInitialized()) {
                     throw "logScreenviewLoad API was called before UIC is initialized.";
                 }
+
                 logScreenview("LOAD", name, referrerName, root);
+
+                lastScreenview = name;
             },
 
             /**
@@ -1088,6 +1110,10 @@ window.TLT = (function () {
                 }
 
                 logScreenview("UNLOAD", name);
+            },
+
+            getScreenview: function() {
+                return lastScreenview;
             },
 
             /**
@@ -3070,7 +3096,7 @@ window.TLT = (function () {
                 var retVal = false;
 
                 // Sanity check
-                if (utils.isUndefOrNull(character) || character === "") {
+                if (utils.isUndefOrNull(character) || !(/\S/.test(character))) {
                     return retVal;
                 }
 
@@ -3451,14 +3477,16 @@ window.TLT = (function () {
              * @param {integer} [maxAge] The max age of the cookie in seconds. If none is specified, defaults to creating a session cookie.
              * @param {string} [path] The absolute path. If none is specified, defaults to "/"
              * @param {string} [domain] The domain on which to set the cookie. If none is specified, defaults to location.hostname
+             * @param {Boolean} [secure] If the secure flag should be set for this cookie.
              */
-            setCookie: function (cookieName, cookieValue, maxAge, path, domain) {
+            setCookie: function (cookieName, cookieValue, maxAge, path, domain, secure) {
                 var i,
                     len,
                     domainArray,
                     expiry,
                     maxAgeStr = "",
-                    pathStr;
+                    pathStr,
+                    secureStr = secure ? ";secure" : "";
 
                 // Sanity check
                 if (!cookieName) {
@@ -3485,14 +3513,14 @@ window.TLT = (function () {
                 // Try to set the cookie with two domain components. e.g. "ibm.com".
                 // If not successful try with three domain components, e.g. "ibm.co.uk" and so on.
                 for (len = domainArray.length, i = (len === 1 ? 1 : 2); i <= len; i += 1) {
-                    document.cookie = cookieName + "=" + cookieValue + ";domain=" + domainArray.slice(-i).join('.') + pathStr + maxAgeStr;
+                    document.cookie = cookieName + "=" + cookieValue + ";domain=" + domainArray.slice(-i).join('.') + pathStr + maxAgeStr + secureStr;
                     if (this.getCookieValue(cookieName) === cookieValue) {
                         break;
                     }
                     if (len === 1) {
                         // Special case when trying to set cookie on single component domain fails.
                         // Try to set the cookie without explicitly specifying the domain.
-                        document.cookie = cookieName + "=" + cookieValue + pathStr + maxAgeStr;
+                        document.cookie = cookieName + "=" + cookieValue + pathStr + maxAgeStr + secureStr;
                     }
                 }
             },
@@ -4016,7 +4044,15 @@ TLT.ModuleContext = (function () {
          * @function
          * @returns {integer} Returns the recorded timestamp in milliseconds corresponding to when the TLT object was created.
          */
-        "getStartTime"
+        "getStartTime",
+
+        /**
+         * @name normalizeUrl
+         * @memberOf TLT.ModuleContext#
+         * @function
+         * @returns {String} Returns normalized url of custom function provided by config.
+         */
+        "normalizeUrl"
     ];
 
     /**
@@ -4654,7 +4690,7 @@ TLT.addService("queue", function (core) {
             httpHeaders = {
                 "Content-Type": "application/json",
                 "X-PageId": core.getPageId(),
-                "X-Tealeaf": "device (UIC) Lib/5.6.0.1822",
+                "X-Tealeaf": "device (UIC) Lib/5.6.0.1827",
                 "X-TealeafType": "GUI",
                 "X-TeaLeaf-Page-Url": getUrlPath(),
                 "X-Tealeaf-SyncXHR": (!!sync).toString()
@@ -7029,6 +7065,9 @@ TLT.addService("domCapture", function (core) {
         messageService,
         dcServiceConfig,
         dcDefaultOptions = {
+            maxMutations: 100,
+            maxLength: 1000000,
+            captureShadowDOM: false,
             captureFrames: false,
             removeScripts: true,
             removeComments: true
@@ -7427,11 +7466,7 @@ TLT.addService("domCapture", function (core) {
             triggers;
 
         triggers = TLT.getConfig("replay").modules.replay.domCapture.triggers;
-        if (Array.prototype.filter) {
-            triggers = triggers.filter(function(item) {
-                return item.event === "load" && item.delayUntil;
-            });
-        }
+
         observer = new window.MutationObserver(function (records) {
             if (records) {
                 processMutationRecords(records);
@@ -7439,19 +7474,15 @@ TLT.addService("domCapture", function (core) {
                 utils.clog("Processed [" + records.length + "] mutation records.");
             }
         });
+
         return observer;
     }
 
-    function findMutation(target, nodeList) {
-        var found = false;
-        utils.forEach(nodeList, function (node) {
-            if (node.matches && node.matches(target)) {
-                found = true; return;
-            }
-        });
-        return found;
-    }
-
+    /**
+     * Checks trigger rules to see if dom capture should be triggered for this mutation.
+     * @private
+     * @returns {}
+     */
     function mutationDomCapture(records, triggers) {
         var i,
             j,
@@ -7459,37 +7490,44 @@ TLT.addService("domCapture", function (core) {
             trigger,
             selector,
             exists,
-            allowDuplicates,
             queryStatus,
+            lastStatus,
             screenviews,
-            screenviewName = TLT.getScreenview();
+            screenviewName = TLT.getScreenview(),
+            dcid,
+            replay = TLT.getModule("replay"),
+            tmpQueue = replay.getTmpQueue();
 
         for (i = 0; i < triggers.length; i++) {
             trigger = triggers[i];
 
-            if (trigger.event === "load" &&
+            if ((trigger.event === window.event.type || window.event.type === "readystatechange") &&
                 trigger.delayUntil &&
-                (!trigger.filter || window.location.pathname.indexOf(trigger.filter) > -1) &&
-                trigger.screenviews.indexOf("lazyload") > -1) {
+                (!trigger.urlFilter || window.location.pathname.indexOf(trigger.urlFilter) > -1) &&
+                (!trigger.screenviews || trigger.screenviews.indexOf(screenviewName) > -1)) {
 
                 for (j = 0; j < records.length; j++) {
                     record = records[j];
 
                     selector = trigger.delayUntil.selector;
                     exists = trigger.delayUntil.exists;
-                    allowDuplicates = trigger.allowDuplicates;
                     queryStatus = document.querySelectorAll(selector).length;
+                    lastStatus = trigger.lastStatus !== undefined ? trigger.lastStatus : 0;
 
-                    if (findMutation(selector, record.addedNodes) && exists === true) {
-                        if (allowDuplicates || (!allowDuplicates && queryStatus === 1)) {
-                            TLT.logScreenviewLoad("lazyload");
+                    if ((exists === true && queryStatus === 1 && lastStatus === 0) ||
+                        (exists === false && queryStatus === 0 && lastStatus === 1)) {
+                        if (trigger.dcid) {
+                            TLT.performDOMCapture("domCapture", document, { eventOn: true, dcid: trigger.dcid });
+                            delete trigger.dcid;
+                        } else {
+                            dcid = TLT.performDOMCapture("domCapture", document, { eventOn: false, forceFullDOM: false });
+                            if (tmpQueue.length > 0) {
+                                tmpQueue[tmpQueue.length - 1].dcid = dcid;
+                                replay.postEventQueue(tmpQueue);
+                            }
                         }
                     }
-                    if (findMutation(selector, record.removedNodes) && exists === false) {
-                        if (allowDuplicates || (!allowDuplicates && queryStatus === 0)) {
-                            TLT.logScreenviewLoad("lazyload");
-                        }
-                    }
+                    trigger.lastStatus = queryStatus;
                 }
             }
         }
@@ -8502,6 +8540,10 @@ TLT.addService("domCapture", function (core) {
             }
         },
 
+        getObserver: function () {
+            return diffObserver;
+        },
+
         /**
          * API function exposed by the DOM Capture service. Accepts the root element and
          * DOM capture options object.
@@ -8774,7 +8816,7 @@ TLT.addService("message", function (core) {
         browserService    = core.getService("browser"),
         configService     = core.getService("config"),
         config            = configService.getServiceConfig("message") || {},
-        windowHref        = window.location.href,
+        windowHref        = core.normalizeUrl(window.location.href),
         windowHostname    = window.location.hostname,
         privacy           = config.hasOwnProperty("privacy") ? config.privacy : [],
         privacyPatterns,
@@ -9511,7 +9553,7 @@ TLT.addService("message", function (core) {
                     messages: messages,
                     clientEnvironment: {
                         webEnvironment: {
-                            libVersion: "5.6.0.1822",
+                            libVersion: "5.6.0.1827",
                             domain: windowHostname,
                             page: windowHref,
                             referrer: document.referrer,
@@ -9853,10 +9895,12 @@ TLT.addModule("TLCookie", function (context) {
      * @return {String} The session cookie value or null if the cookie could not be set.
      */
     function createTLTSIDCookie() {
-        var cookieValue = generateTLTSID();
+        var cookieValue = generateTLTSID(),
+            secure = !!moduleConfig.secureTLTSID,
+            undefined;
 
         // Set the session cookie
-        utils.setCookie(tltCookieName, cookieValue);
+        utils.setCookie(tltCookieName, cookieValue, undefined, undefined, undefined, secure);
 
         return utils.getCookieValue(tltCookieName);
     }
@@ -11015,6 +11059,10 @@ if (TLT && typeof TLT.addModule === "function") {
             navigation = performance.navigation;
 
             if (timing) {
+                // Cannot calculate if the Load event has not occurred yet.
+                if (!timing.loadEventStart) {
+                    return;
+                }
                 queueEvent.performance.timing = parseTiming(timing, config.filter);
                 queueEvent.performance.timing.renderTime = getRenderTime(timing);
             } else if (config.calculateRenderTime) {
@@ -11105,6 +11153,11 @@ if (TLT && typeof TLT.addModule === "function") {
                             postPerformanceEvent(window);
                         }
                     }, utils.getValue(config, "delay", 2000));
+                    break;
+                case "screenview_load":
+                    if (!moduleState.perfEventSent) {
+                        postPerformanceEvent(window);
+                    }
                     break;
                 case "unload":
                     moduleState.unloadReceived = true;
@@ -11320,7 +11373,8 @@ TLT.addModule("replay", function (context) {
      * @return {string} Returns the unique DOM Capture id.
      */
     function scheduleDOMCapture(root, config, delay) {
-        var dcid = null;
+        var o,
+            dcid = null;
         // Sanity check
         if (!root) {
             return dcid;
@@ -11333,10 +11387,21 @@ TLT.addModule("replay", function (context) {
 
         if (delay) {
             dcid = "dcid-" + utils.getSerialNumber() + "." + (new Date()).getTime() + "s";
-            window.setTimeout(function () {
-                config.dcid = dcid;
-                context.performDOMCapture(root, config);
-            }, delay);
+            if (typeof delay === "object") {
+                o = TLT.getService("domCapture").getObserver();
+                o.observe(document, {
+                    childList: true,
+                    attributes: true,
+                    attributeOldValue: true,
+                    characterData: true,
+                    subtree: true
+                });
+            } else {
+                window.setTimeout(function () {
+                    config.dcid = dcid;
+                    context.performDOMCapture(root, config);
+                }, delay);
+            }
         } else {
             delete config.dcid;
             dcid = context.performDOMCapture(root, config);
@@ -11426,11 +11491,12 @@ TLT.addModule("replay", function (context) {
 
         if (capture) {
             // Immediate or delayed?
-            delay = dcTrigger.delay || (dcTrigger.event === "load" ? 7 : 0);
+            delay = dcTrigger.delay || dcTrigger.delayUntil || (dcTrigger.event === "load" ? 7 : 0);
             // Force full DOM snapshot?
             captureConfig.forceFullDOM = !!dcTrigger.fullDOMCapture;
 
             dcid = scheduleDOMCapture(window.document, captureConfig, delay);
+            dcTrigger.dcid = dcid;
         }
 
         return dcid;
@@ -12530,9 +12596,7 @@ TLT.addModule("replay", function (context) {
 
             if (isDuplicateEvent(webEvent, prevWebEvent)) {
                 prevWebEvent = webEvent;
-                if (webEvent.name !== "lazyload") {
-                    return;
-                }
+                return;
             }
 
             prevWebEvent = webEvent;
@@ -12742,6 +12806,21 @@ TLT.addModule("replay", function (context) {
                     enabled: true
                 }
             },
+
+            normalization: {
+                /**
+                  * User defined URL normalization function which accepts an URL or path and returns
+                  * the normalized URL or normalized path.
+                  * @param urlOrPath {String} URL or Path which needs to be normalized.
+                  * @returns {String} The normalized URL or Path.
+                  */
+                urlFunction: function (urlOrPath) {
+                    // Normalize the input URL or path here.
+                    // Refer to the documentation for an example to normalize the URL path or URL query parameters.
+                    return urlOrPath;
+                }
+            },
+
             // Set the sessionDataEnabled flag to true only if it's OK to expose Tealeaf session data to 3rd party scripts.
             sessionDataEnabled: false,
             sessionData: {
@@ -12827,15 +12906,7 @@ TLT.addModule("replay", function (context) {
                 }
             },
             domCapture: {
-                diffEnabled: true,
-                // DOM Capture options
-                options: {
-                    maxMutations: 100,       // If this threshold is met or exceeded, a full DOM is captured instead of a diff.
-                    maxLength: 1000000,      // If this threshold is exceeded, the snapshot will not be sent
-                    captureFrames: false,    // Should child frames/iframes be captured
-                    captureShadowDOM: false, // Should Shadow DOM content be captured
-                    removeScripts: true      // Should script tags be removed from the captured snapshot
-                }
+                diffEnabled: true
             },
             browser: {
                 sizzleObject: "window.Sizzle",
@@ -12903,25 +12974,17 @@ TLT.addModule("replay", function (context) {
                      */
                     triggers: [
                         {
-                            event: "click"
+                            event: "click",
+                            delayUntil: {
+                                selector: "#loading-img",
+                                exists: false
+                            }
                         },
                         {
                             event: "change"
                         },
                         {
                             event: "load"
-                        },
-                        {
-                            event: "load",
-                            screenviews: ["lazyload"],
-                            delayUntil: {
-                                selector: "#loading-img",
-                                exists: false
-                            },
-                            allowDuplicates: true,
-                            filter: "/loadTest.html",
-                            fullDOMCapture: false,
-                            flushQueue: true
                         }
                     ]
                 }

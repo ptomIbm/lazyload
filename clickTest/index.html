@@ -1,0 +1,36 @@
+<html>
+<body>
+<div>Test Page - dynamic click</div>
+<br/>
+<!--An empty tag - this be the loading image-->
+<span id="loading"></span>
+<div id="main"></div>
+
+<button onclick="load();">Make call</button>
+<script>
+function load() {
+    var xmlhttp;
+    if (window.XMLHttpRequest) {// code for IE7+, Firefox, Chrome, Opera, Safari
+        xmlhttp = new XMLHttpRequest();
+    }
+    else {// code for IE6, IE5
+        xmlhttp = new ActiveXObject("Microsoft.XMLHTTP");
+    }
+    xmlhttp.onreadystatechange = function () {
+        if (xmlhttp.readyState == 4) {
+            document.getElementById("loading").innerHTML = ""; // Hide the image after the response from the server
+            if (xmlhttp.status === 0) {
+                document.getElementById("main").innerHTML = "Failed";
+            } else {
+                document.getElementById("main").innerHTML = "Load successful.<br /><br />" + xmlhttp.responseText;
+            }
+        }
+    }
+    document.getElementById("loading").innerHTML = '<img src="https://www.w3schools.com/jquery/demo_wait.gif" id="loading-img"/>'; // Set here the image before sending request
+    xmlhttp.open("GET", "http://httpbin.org/delay/5", true);
+    xmlhttp.send();
+}
+</script>
+<script src="./tealeaf.js"></script>
+</body>
+</html>
