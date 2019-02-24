@@ -7465,7 +7465,7 @@ TLT.addService("domCapture", function (core) {
         var observer,
             triggers;
 
-        triggers = TLT.getConfig("replay").modules.replay.domCapture.triggers;
+        triggers = core.getConfig("replay").modules.replay.domCapture.triggers;
 
         observer = new window.MutationObserver(function (records) {
             if (records) {
@@ -7493,42 +7493,41 @@ TLT.addService("domCapture", function (core) {
             queryStatus,
             lastStatus,
             screenviews,
-            screenviewName = TLT.getScreenview(),
-            dcid,
-            replay = TLT.getModule("replay"),
-            tmpQueue = replay.getTmpQueue();
+            screenviewName = core.getScreenview(),
+            replay = core.getModule("replay"),
+            webEvent = replay.getLastEvent(),
+            pendingQueue = replay.getPendingQueue(),
+            pendingEvent,
+            readystatechange = (window.event && window.event.type === "readystatechange");
 
         for (i = 0; i < triggers.length; i++) {
             trigger = triggers[i];
 
-            if ((trigger.event === window.event.type || window.event.type === "readystatechange") &&
+            if ((trigger.event === webEvent.type || readystatechange) &&
                 trigger.delayUntil &&
                 (!trigger.urlFilter || window.location.pathname.indexOf(trigger.urlFilter) > -1) &&
-                (!trigger.screenviews || trigger.screenviews.indexOf(screenviewName) > -1)) {
+                (!trigger.screenviews || trigger.screenviews.indexOf(screenviewName) > -1) &&
+                (!trigger.targets || readystatechange || (!readystatechange && utils.matchTarget(trigger.targets, webEvent.target) != -1))) {
 
-                for (j = 0; j < records.length; j++) {
-                    record = records[j];
+                selector = trigger.delayUntil.selector;
+                exists = trigger.delayUntil.exists;
+                queryStatus = document.querySelectorAll(selector).length;
+                lastStatus = trigger.lastStatus ? trigger.lastStatus : 0;
 
-                    selector = trigger.delayUntil.selector;
-                    exists = trigger.delayUntil.exists;
-                    queryStatus = document.querySelectorAll(selector).length;
-                    lastStatus = trigger.lastStatus !== undefined ? trigger.lastStatus : 0;
+                if ((exists === true && queryStatus > 0 && lastStatus === 0) ||
+                    (exists === false && queryStatus === 0 && lastStatus > 0)) {
 
-                    if ((exists === true && queryStatus === 1 && lastStatus === 0) ||
-                        (exists === false && queryStatus === 0 && lastStatus === 1)) {
-                        if (trigger.dcid) {
-                            TLT.performDOMCapture("domCapture", document, { eventOn: true, dcid: trigger.dcid });
-                            delete trigger.dcid;
-                        } else {
-                            dcid = TLT.performDOMCapture("domCapture", document, { eventOn: false, forceFullDOM: false });
-                            if (tmpQueue.length > 0) {
-                                tmpQueue[tmpQueue.length - 1].dcid = dcid;
-                                replay.postEventQueue(tmpQueue);
-                            }
+                    for (j = 0; j < pendingQueue.length; j++) {
+                        pendingEvent = pendingQueue[j];
+
+                        if (trigger.event === pendingEvent.type) {
+                            core.performDOMCapture("domCapture", document, { eventOn: true, dcid: pendingEvent.dcid, forceFullDom: false });
+                            pendingQueue.splice(j--, 1);
+                            break;
                         }
                     }
-                    trigger.lastStatus = queryStatus;
                 }
+                trigger.lastStatus = queryStatus;
             }
         }
     }
@@ -8540,8 +8539,20 @@ TLT.addService("domCapture", function (core) {
             }
         },
 
-        getObserver: function () {
-            return diffObserver;
+        /**
+         * Starts the observer to the list of windows to be observed.
+         */
+        startObserver: function () {
+            var i;
+
+            if (diffObserver) {
+                for (i = 0; i < observedWindowList.length; i++) {
+                    try {
+                        diffObserver.observe(observedWindowList[i].document, diffObserverConfig);
+                    }
+                    catch (e) {}
+                }
+            }
         },
 
         /**
@@ -11212,7 +11223,9 @@ TLT.addModule("replay", function (context) {
         },
         pastEvents = {},
         lastEventId = null,
+        lastEvent = null,
         tmpQueue = [],
+        pendingQueue = [],
         eventCounter = 0,
         firstDOMCaptureEventFlag = true,
         curClientState = null,
@@ -11373,8 +11386,7 @@ TLT.addModule("replay", function (context) {
      * @return {string} Returns the unique DOM Capture id.
      */
     function scheduleDOMCapture(root, config, delay) {
-        var o,
-            dcid = null;
+        var dcid = null;
         // Sanity check
         if (!root) {
             return dcid;
@@ -11388,14 +11400,7 @@ TLT.addModule("replay", function (context) {
         if (delay) {
             dcid = "dcid-" + utils.getSerialNumber() + "." + (new Date()).getTime() + "s";
             if (typeof delay === "object") {
-                o = TLT.getService("domCapture").getObserver();
-                o.observe(document, {
-                    childList: true,
-                    attributes: true,
-                    attributeOldValue: true,
-                    characterData: true,
-                    subtree: true
-                });
+                TLT.getService("domCapture").startObserver();
             } else {
                 window.setTimeout(function () {
                     config.dcid = dcid;
@@ -11497,6 +11502,9 @@ TLT.addModule("replay", function (context) {
 
             dcid = scheduleDOMCapture(window.document, captureConfig, delay);
             dcTrigger.dcid = dcid;
+            if (dcTrigger.delayUntil) {
+                pendingQueue.push({type: eventType, target: target, dcid: dcid});
+            }
         }
 
         return dcid;
@@ -12534,7 +12542,9 @@ TLT.addModule("replay", function (context) {
         currOrientation: currOrientation,
         pastEvents: pastEvents,
         lastEventId: lastEventId,
+        getLastEvent: function () { return lastEvent; },
         getTmpQueue: function () { return tmpQueue; },
+        getPendingQueue: function () { return pendingQueue; },
         postEventQueue: postEventQueue,
         eventCounter: eventCounter,
         curClientState: curClientState,
@@ -12734,6 +12744,10 @@ TLT.addModule("replay", function (context) {
                 break;
             }
 
+            lastEvent = webEvent;
+            if (pastEvents[id].webEvent && pastEvents[id].webEvent.type === "change") {
+                lastEvent = pastEvents[id].webEvent;
+            }
             lastEventId = id;
             return returnObj;
         },
@@ -12977,11 +12991,7 @@ TLT.addModule("replay", function (context) {
                             event: "click"
                         },
                         {
-                            event: "change"
-                        },
-                        {
                             event: "change",
-                            targets: ["select"],
                             delayUntil: {
                                 selector: "#loading-img",
                                 exists: false
